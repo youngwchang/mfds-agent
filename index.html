@@ -486,7 +486,7 @@ async function callClaude(system, messages, maxTok=4000, useWebSearch=false) {
   if(!r.ok){
     let errMsg;
     if(r.status === 404){
-      errMsg = '프록시 함수 미배포 (404). netlify/edge-functions/claude-proxy.mjs 파일이 함께 업로드되어야 합니다. README_DEPLOY.md 참조.';
+      errMsg = '프록시 응답 없음 (404). 서버가 일시적으로 응답 불가 상태일 수 있습니다 (Render free 플랜의 cold start, 메모리 부족, 또는 일시적 네트워크 오류). 잠시 후 재시도하거나 Render 대시보드의 Logs 탭에서 에러 확인.';
     } else if(r.status === 403){
       try {
         const e = await r.json();
