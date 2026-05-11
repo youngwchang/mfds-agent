@@ -1,0 +1,23 @@
+# Render Blueprint - 한 번에 서비스 생성
+# 사용법:
+#   1. GitHub에 코드 push
+#   2. Render 대시보드 → New + → Blueprint → 리포지토리 선택
+#   3. Render가 이 파일을 읽어 자동 구성
+#   4. ANTHROPIC_API_KEY 는 Render 대시보드에서 수동 입력
+
+services:
+  - type: web
+    name: mfds-agent
+    runtime: node
+    plan: free
+    region: singapore  # 한국에 가장 가까운 free 리전 (oregon은 미국)
+    buildCommand: ""   # 의존성 없음 - 빌드 단계 불필요
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false      # ⚠ Render 대시보드에서 수동으로 입력 (sync:false = 절대 git에 노출 안 됨)
+      - key: ALLOWED_ORIGINS
+        sync: false      # 선택 - custom domain 사용 시
+      - key: NODE_VERSION
+        value: "20"

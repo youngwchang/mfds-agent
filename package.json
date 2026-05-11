@@ -1,0 +1,13 @@
+{
+  "name": "mfds-agent",
+  "version": "4.0.0",
+  "description": "MFDS 허가 타당성 평가 에이전트 - 7-Agent Pipeline with Anthropic API proxy",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
