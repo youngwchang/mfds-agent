@@ -135,12 +135,18 @@ function jsonResp(res, obj, status, req) {
 
 // ── /api/claude 핸들러 ──────────────────────────────────
 async function handleClaude(req, res) {
+  const reqId = Math.random().toString(36).slice(2, 8);
+  const t0 = Date.now();
+  console.log(`[${new Date().toISOString()}] [${reqId}] /api/claude ${req.method} START`);
+
   if (req.method === 'OPTIONS') {
     res.writeHead(204, corsHeaders(req)).end();
+    console.log(`[${new Date().toISOString()}] [${reqId}] /api/claude OPTIONS done`);
     return;
   }
   if (req.method !== 'POST') {
     jsonResp(res, { error: { message: 'Method Not Allowed' } }, 405, req);
+    console.log(`[${new Date().toISOString()}] [${reqId}] /api/claude method-not-allowed`);
     return;
   }
 
@@ -224,6 +230,8 @@ async function handleClaude(req, res) {
   };
   if (useWebSearch) upstreamHeaders['anthropic-beta'] = 'web-search-2025-03-05';
 
+  console.log(`[${new Date().toISOString()}] [${reqId}] → Anthropic API (body=${bodyText.length}B, webSearch=${useWebSearch})`);
+
   try {
     const upstream = await fetch(ANTHROPIC_URL, {
       method: 'POST',
@@ -231,13 +239,18 @@ async function handleClaude(req, res) {
       body: bodyText
     });
     const text = await upstream.text();
+    const elapsed = Date.now() - t0;
+    console.log(`[${new Date().toISOString()}] [${reqId}] ← Anthropic responded status=${upstream.status}, ${text.length}B, ${elapsed}ms`);
     res.writeHead(upstream.status, {
       ...corsHeaders(req),
       'Content-Type': 'application/json; charset=utf-8',
       'X-Proxy-Upstream-Status': String(upstream.status)
     });
     res.end(text);
+    console.log(`[${new Date().toISOString()}] [${reqId}] /api/claude DONE in ${Date.now()-t0}ms`);
   } catch (err) {
+    const elapsed = Date.now() - t0;
+    console.error(`[${new Date().toISOString()}] [${reqId}] Anthropic fetch FAILED after ${elapsed}ms: ${err.message}`);
     jsonResp(res, {
       error: { message: 'Anthropic API 호출 실패: ' + err.message }
     }, 502, req);
@@ -248,6 +261,10 @@ async function handleClaude(req, res) {
 const server = http.createServer(async (req, res) => {
   try {
     const urlPath = req.url.split('?')[0];
+    // /api/claude 외 요청도 간단히 로깅 (404 발생 위치 추적용)
+    if (urlPath !== '/api/claude' && !urlPath.startsWith('/index.html') && urlPath !== '/healthz') {
+      console.log(`[${new Date().toISOString()}] ${req.method} ${urlPath}`);
+    }
 
     if (urlPath === '/api/claude') {
       await handleClaude(req, res);
