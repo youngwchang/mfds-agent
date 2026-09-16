@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MFDS 허가 타당성 평가 에이전트 v4 (Netlify)</title>
+<title>MFDS 허가 타당성 평가 에이전트 v4</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
 <script src="https://unpkg.com/docx@8.5.0/build/index.umd.js"></script>
@@ -168,7 +168,7 @@ textarea{resize:vertical;min-height:74px;font-family:var(--kr);font-size:13px;}
   <div class="hdr-icon">⚕</div>
   <div>
     <h1>MFDS 허가 타당성 평가 에이전트</h1>
-    <div class="hdr-sub">Korean Regulatory Intelligence · 7-Agent Pipeline · Netlify Shared Deployment</div>
+    <div class="hdr-sub">Korean Regulatory Intelligence · 7-Agent Pipeline · Render Deployment</div>
   </div>
   <div class="vtag">v4.0 · claude-sonnet-4-6</div>
 </div>
@@ -178,8 +178,8 @@ textarea{resize:vertical;min-height:74px;font-family:var(--kr);font-size:13px;}
   <div class="panel">
     <div class="plabel">배포 모드 · Shared Proxy</div>
     <div class="netlify-note">
-      🔒 API 키는 Netlify 서버 측 환경변수(<code>ANTHROPIC_API_KEY</code>)에 저장됩니다.<br>
-      모든 요청은 <code>/api/claude</code> (Edge Function) 로 라우팅되며, 사용자는 별도 키 입력 없이 사용 가능합니다.<br>
+      🔒 API 키는 Render 서버 측 환경변수(<code>ANTHROPIC_API_KEY</code>)에 저장됩니다.<br>
+      모든 요청은 <code>/api/claude</code> 프록시로 라우팅되며, 사용자는 별도 키 입력 없이 사용 가능합니다.<br>
       <span id="proxyStatus" style="color:var(--text2)">⊙ 프록시 상태: 확인 대기</span>
     </div>
     <div class="security-note">
@@ -261,12 +261,69 @@ function triggerFile(i) {
   document.getElementById('fi'+i).click();
 }
 
+const MAX_PDF_BYTES = 6 * 1024 * 1024;   // 서버 본문 한도 10MB, base64 는 33% 팽창
+
+// PDF를 document 블록으로 보내면 페이지당 텍스트 토큰에 더해 페이지 이미지
+// 토큰까지 청구된다. 브라우저에서 텍스트만 추출하면 5~10배가 줄어든다.
+// 스캔본이라 텍스트가 안 나오면 기존처럼 원본을 그대로 보낸다.
+const PDFJS_VER = '4.7.76';
+let _pdfjs = null;
+async function getPdfjs(){
+  if(_pdfjs) return _pdfjs;
+  const m = await import(`https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/build/pdf.min.mjs`);
+  m.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/build/pdf.worker.min.mjs`;
+  _pdfjs = m;
+  return m;
+}
+
+const MAX_PDF_EXTRACT_PAGES = 120;
+
+async function extractPdfText(f){
+  try {
+    const pdfjs = await getPdfjs();
+    const ab = await toAB(f);
+    const doc = await pdfjs.getDocument({data: new Uint8Array(ab)}).promise;
+    const pages = Math.min(doc.numPages, MAX_PDF_EXTRACT_PAGES);
+    const parts = [];
+    for(let p=1; p<=pages; p++){
+      const page = await doc.getPage(p);
+      const tc = await page.getTextContent();
+      parts.push(tc.items.map(it=>it.str).join(' '));
+    }
+    const text = parts.join('\n').replace(/[ \t]{2,}/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+    if(text.length < 300) return {ok:false, reason:'텍스트 없음(스캔본 추정)'};
+    return {ok:true, text, pages: doc.numPages, used: pages};
+  } catch(e){
+    return {ok:false, reason: e.message||'추출 실패'};
+  }
+}
+
 async function handleFile(i, f) {
   const ext = f.name.split('.').pop().toLowerCase();
   setSlot(i, '⏳', '읽는 중...', '', false);
   try {
     let content;
-    if(ext==='pdf') content = {type:'pdf', data: await toB64(f), name: f.name};
+    if(ext==='pdf'){
+      setSlot(i, '⏳', 'PDF 텍스트 추출 중...', f.name, false);
+      const ex = await extractPdfText(f);
+      if(ex.ok){
+        content = {type:'text', data: ex.text, name: f.name};
+        files[i] = content;
+        const more = ex.pages > ex.used ? ` (앞 ${ex.used}p만)` : '';
+        setSlot(i, '✅', f.name, `PDF ${ex.pages}p${more} · 텍스트 ${ex.text.length.toLocaleString()}자`, true);
+        return;
+      }
+      // 폴백: 원본 PDF 전송 (토큰이 크므로 용량 제한을 건다)
+      if(f.size > MAX_PDF_BYTES){
+        setSlot(i, '❌', 'PDF 용량 초과', `${(f.size/1048576).toFixed(1)}MB — 스캔본은 6MB 이하로 분할 필요`, false);
+        files[i] = null;
+        return;
+      }
+      content = {type:'pdf', data: await toB64(f), name: f.name};
+      files[i] = content;
+      setSlot(i, '⚠️', f.name, `스캔본 추정 · 원본 전송 (${(f.size/1024).toFixed(0)}KB)`, true);
+      return;
+    }
     else if(ext==='docx'||ext==='doc') {
       const ab = await toAB(f);
       const r = await mammoth.extractRawText({arrayBuffer:ab});
@@ -466,27 +523,60 @@ const SCHEMA_HIRA = {type:'object', required:['reimbursement_feasibility'], prop
 }};
 
 // ══════════════════════════════════════════════
-// API HELPERS — Netlify Edge Function 프록시 사용 (40초 wall time 허용)
+// API HELPERS — Render Web Service 프록시 (함수 타임아웃 없음)
 // ══════════════════════════════════════════════
 const MODEL = 'claude-sonnet-4-6';
-const PROXY_URL = '/api/claude';  // Netlify Edge Function 경로 (free 플랜 10초 한도 우회)
 
-async function callClaude(system, messages, maxTok=4000, useWebSearch=false) {
-  const body = {model: MODEL, max_tokens: maxTok, system, messages};
-  if(useWebSearch) body.tools = [{type:'web_search_20250305', name:'web_search'}];
+// 에이전트별 모델 라우팅.
+// 판단이 필요한 단계는 Sonnet을 유지하고, 구조화된 JSON을 기계적으로
+// 점검하는 단계만 내려서 쓴다. 품질이 떨어진다고 느끼면 해당 줄을
+// MODEL 로 되돌리면 된다.
+const MODEL_FAST = 'claude-haiku-4-5-20251001';
+const AGENT_MODEL = {
+  Agent01: MODEL,       // 문서 → 임상근거 추출 (정확도 중요)
+  Agent02: MODEL,       // 통계적 엄밀성 평가 (판단 필요)
+  Agent03: MODEL,       // 웹 검색 기반 선례 조사
+  Agent04: MODEL,       // 종합 허가 타당성 (가장 중요 — 절대 내리지 말 것)
+  Agent05: MODEL_FAST,  // CTD 완전성 체크리스트 (기계적 대조)
+  Agent06: MODEL,       // CMC/GMP 심층 평가
+  Agent07: MODEL,       // HIRA 급여 등재 평가
+};
+
+// 에이전트 간 전달용 JSON 직렬화.
+// JSON.stringify(x, null, 2) 의 들여쓰기·줄바꿈이 입력 토큰의 37~43% 를 차지했다.
+// 모델은 compact JSON 도 동일하게 읽으므로 사람이 볼 일 없는 구간은 압축한다.
+const J = (x) => JSON.stringify(x);
+const PROXY_URL = '/api/claude';  // Render Web Service 의 프록시 엔드포인트
+
+const MAX_WEB_SEARCHES = 8;   // 상한이 없으면 Agent 03 의 토큰이 예측 불가능해진다
+const RETRY_STATUS = [408, 429, 500, 502, 503, 504, 529];
+const sleep = ms => new Promise(r=>setTimeout(r, ms));
+
+async function callClaude(system, messages, maxTok=4000, useWebSearch=false, model=MODEL) {
+  const body = {model, max_tokens: maxTok, system, messages};
+  if(useWebSearch) body.tools = [{type:'web_search_20250305', name:'web_search', max_uses: MAX_WEB_SEARCHES}];
   const headers = {'Content-Type':'application/json'};
   if(useWebSearch) headers['x-use-web-search'] = '1';
 
+  // 일시적 오류 한 번에 파이프라인 전체가 날아가던 문제 — 지수 백오프 재시도
   let r;
-  try {
-    r = await fetch(PROXY_URL, {method:'POST', headers, body:JSON.stringify(body)});
-  } catch(networkErr) {
-    throw new Error('프록시 연결 실패 (네트워크 오류): '+networkErr.message+'. Netlify 배포 환경에서 실행 중인지 확인하세요.');
+  for(let attempt=0; attempt<4; attempt++){
+    try {
+      r = await fetch(PROXY_URL, {method:'POST', headers, body:JSON.stringify(body)});
+    } catch(networkErr) {
+      if(attempt === 3) throw new Error('프록시 연결 실패 (네트워크 오류): '+networkErr.message+'. 서버가 깨어나는 중일 수 있습니다. 잠시 후 재시도하세요.');
+      pushDiag('RETRY', `네트워크 오류 — ${2*(2**attempt)}초 후 재시도 (${attempt+1}/3)`, '#f5c542');
+      await sleep(2000 * 2**attempt);
+      continue;
+    }
+    if(r.ok || !RETRY_STATUS.includes(r.status) || attempt === 3) break;
+    pushDiag('RETRY', `서버 응답 ${r.status} — ${2*(2**attempt)}초 후 재시도 (${attempt+1}/3)`, '#f5c542');
+    await sleep(2000 * 2**attempt);
   }
   if(!r.ok){
     let errMsg;
     if(r.status === 404){
-      errMsg = '프록시 응답 없음 (404). 서버가 일시적으로 응답 불가 상태일 수 있습니다 (Render free 플랜의 cold start, 메모리 부족, 또는 일시적 네트워크 오류). 잠시 후 재시도하거나 Render 대시보드의 Logs 탭에서 에러 확인.';
+      errMsg = '프록시 응답 없음 (404). Render 서비스가 잠들었거나 재시작 중일 수 있습니다. 30초 후 재시도하거나 Render 대시보드 Logs 탭을 확인하세요.';
     } else if(r.status === 403){
       try {
         const e = await r.json();
@@ -505,12 +595,25 @@ async function callClaude(system, messages, maxTok=4000, useWebSearch=false) {
     }
     throw new Error(errMsg);
   }
-  const d = await r.json();
-  return {
-    text: (d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n'),
-    stopReason: d.stop_reason,
-    usage: d.usage
-  };
+  let d = await r.json();
+  let text = (d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+
+  // web_search 는 서버 실행 도구다. 오래 걸리면 stop_reason='pause_turn' 으로 끊기는데,
+  // 그대로 반환하면 JSON 이 중간에 잘려 파싱이 실패한다. 응답을 넣어 이어받는다.
+  let hops = 0;
+  while(d.stop_reason === 'pause_turn' && hops < 4){
+    hops++;
+    pushDiag('PAUSE', `서버 도구 실행 중 일시중단 — 이어받기 ${hops}`, '#00c8e8');
+    const cont = {model, max_tokens: maxTok, system,
+                  messages: messages.concat([{role:'assistant', content: d.content}])};
+    if(useWebSearch) cont.tools = [{type:'web_search_20250305', name:'web_search', max_uses: MAX_WEB_SEARCHES}];
+    const rc = await fetch(PROXY_URL, {method:'POST', headers, body:JSON.stringify(cont)});
+    if(!rc.ok) break;
+    d = await rc.json();
+    text += (d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+  }
+
+  return { text, stopReason: d.stop_reason, usage: d.usage };
 }
 
 // 페이지 로드 시 프록시 상태 자동 확인
@@ -520,7 +623,7 @@ async function checkProxyStatus() {
 
   // file:// 프로토콜 감지 - 로컬 파일 직접 열기 케이스
   if(location.protocol === 'file:'){
-    el.innerHTML = '<span style="color:var(--red)">● 로컬 파일(file://)로 열림. Netlify 배포 또는 <code>netlify dev</code> 실행 필요</span>';
+    el.innerHTML = '<span style="color:var(--red)">● 로컬 파일(file://)로 열림. <code>node server.js</code> 실행 후 http://localhost:3000 으로 접속하세요</span>';
     return;
   }
 
@@ -529,14 +632,14 @@ async function checkProxyStatus() {
     if(r.status === 400 || r.status === 200){
       el.innerHTML = '<span style="color:var(--green)">● 프록시 정상 연결</span>';
     } else if(r.status === 404){
-      el.innerHTML = '<span style="color:var(--red)">● 프록시 404 - Edge Function 미배포. netlify/edge-functions/claude-proxy.mjs 파일이 배포에 포함되어야 함. <a href="README_DEPLOY.md" target="_blank" style="color:var(--accent)">배포 가이드 보기</a></span>';
+      el.innerHTML = '<span style="color:var(--red)">● 프록시 404 — Render 서비스 응답 없음. cold start 중이면 30~50초 후 정상화됩니다. 계속되면 Render Logs 탭 확인.</span>';
     } else if(r.status === 403){
       el.innerHTML = '<span style="color:var(--red)">● 프록시 거부 (도메인 제한). ALLOWED_ORIGINS 환경변수 확인 필요</span>';
     } else if(r.status === 500){
       const j = await r.json().catch(()=>({}));
       const msg = j.error?.message||'서버 오류';
       const isKeyMissing = msg.includes('ANTHROPIC_API_KEY');
-      el.innerHTML = '<span style="color:var(--red)">● ' + (isKeyMissing ? '환경변수 ANTHROPIC_API_KEY 미설정 (Netlify Site settings에서 추가 필요)' : '프록시 오류: '+msg) + '</span>';
+      el.innerHTML = '<span style="color:var(--red)">● ' + (isKeyMissing ? '환경변수 ANTHROPIC_API_KEY 미설정 (Render 대시보드 → Environment 탭에서 추가)' : '프록시 오류: '+msg) + '</span>';
     } else if(r.status === 502){
       el.innerHTML = '<span style="color:var(--orange)">● Anthropic API 응답 오류 (502). 일시적일 수 있음, 재시도 시 정상화 가능</span>';
     } else {
@@ -608,14 +711,15 @@ function tryJSON(raw){
 // callJSON: parse + retry on parse failure + retry on max_tokens truncation + schema validation
 async function callJSON(system, messages, maxTok, opts={}){
   const {useWebSearch=false, schema=null, agentName='?'} = opts;
-  let r = await callClaude(system, messages, maxTok, useWebSearch);
+  const model = AGENT_MODEL[agentName] || MODEL;
+  let r = await callClaude(system, messages, maxTok, useWebSearch, model);
 
   // If stop_reason is max_tokens AND we can afford to retry with larger budget, retry once.
   if(r.stopReason === 'max_tokens' && maxTok < 16000){
     pushDiag('TOKEN', `${agentName}: max_tokens 도달 (${maxTok} → ${Math.min(maxTok*2, 16000)}로 증액 재시도)`, '#f5c542');
     const bigger = Math.min(maxTok*2, 16000);
     try {
-      r = await callClaude(system, messages, bigger, useWebSearch);
+      r = await callClaude(system, messages, bigger, useWebSearch, model);
     } catch(e){ /* keep original r */ }
   }
 
@@ -624,9 +728,9 @@ async function callJSON(system, messages, maxTok, opts={}){
   catch(e1){
     pushDiag('PARSE', `${agentName}: 1차 파싱 실패, 재시도`, '#f5c542');
     const retry = await callClaude(system, messages.concat([
-      {role:'assistant',content:r.text},
+      {role:'assistant',content: r.text && r.text.trim() ? r.text : '(빈 응답)'},
       {role:'user',content:'직전 응답이 JSON 파싱에 실패했습니다. 어떤 설명이나 코드펜스도 없이 오직 완전하고 유효한 JSON 객체 하나만 다시 반환하세요. 모든 문자열은 큰따옴표로 닫고, 마지막 쉼표는 제거하세요.'}
-    ]), Math.min(maxTok*1.5|0, 16000), useWebSearch);
+    ]), Math.min(maxTok*1.5|0, 16000), useWebSearch, model);
     try { data = tryJSON(retry.text); }
     catch(e2){ throw new Error(e1.message); }
   }
@@ -665,9 +769,13 @@ function buildDocContent(ctx) {
     if(f.type==='pdf'){
       // PDF: pass as document block (model handles natively); wrap with descriptive text marker.
       mc.push({type:'text', text:`\n<document index="${idx}" name="${xmlEscape(f.name)}" content-type="user-uploaded-pdf">`});
-      mc.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:f.data}});
+      // 파싱 실패 재시도 때 같은 문서가 통째로 다시 올라간다. 캐싱으로 재전송 비용을 줄인다.
+      mc.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:f.data}, cache_control:{type:'ephemeral'}});
       mc.push({type:'text', text:`</document>`});
     } else {
+      if(f.data.length > 50000){
+        pushDiag('TRUNCATE', `${f.name}: ${f.data.length.toLocaleString()}자 중 앞 50,000자만 분석에 사용됩니다`, '#f47a3a');
+      }
       const {text:cleaned, hits} = sanitizeDocText(f.data.substring(0,50000));
       totalHits += hits;
       mc.push({type:'text', text:'\n'+wrapTextDocument(f.name, cleaned, idx)});
@@ -679,6 +787,12 @@ function buildDocContent(ctx) {
     totalHits += hits;
     mc.push({type:'text', text:`\n<user_context>\n${xmlEscape(cleanedCtx)}\n</user_context>`});
   }
+
+  // 입력 규모를 눈으로 확인할 수 있게 남긴다 (한/영 혼합 대략 2.4자 = 1토큰)
+  const textChars = mc.filter(b=>b.type==='text').reduce((a,b)=>a+b.text.length, 0);
+  const rawPdfs = mc.filter(b=>b.type==='document').length;
+  pushDiag('TOKEN', `Agent01 입력 ≈ ${Math.round(textChars/2.4).toLocaleString()} 토큰`
+    + (rawPdfs ? ` + 원본 PDF ${rawPdfs}건(페이지당 별도 과금)` : ''), '#00c8e8');
 
   if(totalHits > 0){
     pushDiag('INJECTION', `Prompt injection 의심 패턴 ${totalHits}건 감지·중화 (REDACTED 처리)`, '#a08af0');
@@ -996,7 +1110,7 @@ async function run() {
     setPS('p2','active','평가 중');
     setSL('▸ 통계적 엄밀성 및 시험 설계를 평가하고 있습니다...');
     let sc;
-    try { sc = (await callJSON(SYS2, [{role:'user',content:`임상근거:\n${JSON.stringify(ev,null,2)}\n\n10개 통계 차원을 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 5000, {schema:SCHEMA_SC, agentName:'Agent02'})).data; }
+    try { sc = (await callJSON(SYS2, [{role:'user',content:`임상근거:\n${J(ev)}\n\n10개 통계 차원을 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 5000, {schema:SCHEMA_SC, agentName:'Agent02'})).data; }
     catch(e){ throw new Error('Agent 02 JSON 파싱 오류 — '+e.message); }
     setPS('p2','done','완료');
 
@@ -1018,7 +1132,7 @@ async function run() {
     setPS('p4','active','평가 중');
     setSL('▸ MFDS 허가 타당성을 종합 평가하고 있습니다...');
     let as;
-    try { as = (await callJSON(SYS4, [{role:'user',content:`[임상근거]\n${JSON.stringify(ev,null,2)}\n\n[통계 평가]\n${JSON.stringify(sc,null,2)}\n\n[한국 선례]\n${JSON.stringify(pr,null,2)}\n\n종합 MFDS 허가 타당성을 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 6500, {schema:SCHEMA_AS, agentName:'Agent04'})).data; }
+    try { as = (await callJSON(SYS4, [{role:'user',content:`[임상근거]\n${J(ev)}\n\n[통계 평가]\n${J(sc)}\n\n[한국 선례]\n${J(pr)}\n\n종합 MFDS 허가 타당성을 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 6500, {schema:SCHEMA_AS, agentName:'Agent04'})).data; }
     catch(e){ throw new Error('Agent 04 JSON 파싱 오류 — '+e.message); }
     setPS('p4','done','완료');
 
@@ -1026,7 +1140,7 @@ async function run() {
     setPS('p5','active','점검 중');
     setSL('▸ CTD 완전성 체크를 수행하고 있습니다...');
     let ctd;
-    try { ctd = (await callJSON(SYS5, [{role:'user',content:`[임상근거]\n${JSON.stringify(ev,null,2)}\n\n[MFDS 평가]\n${JSON.stringify(as,null,2)}\n\nCTD 완전성을 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 4500, {schema:SCHEMA_CTD, agentName:'Agent05'})).data; }
+    try { ctd = (await callJSON(SYS5, [{role:'user',content:`[임상근거]\n${J(ev)}\n\n[MFDS 평가]\n${J(as)}\n\nCTD 완전성을 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 4500, {schema:SCHEMA_CTD, agentName:'Agent05'})).data; }
     catch(e){ throw new Error('Agent 05 JSON 파싱 오류 — '+e.message); }
     setPS('p5','done','완료');
 
@@ -1034,7 +1148,7 @@ async function run() {
     setPS('p6','active','평가 중');
     setSL('▸ CMC/GMP 제조·품질 규제 리스크를 심층 평가하고 있습니다...');
     let cmc;
-    try { cmc = (await callJSON(SYS6, [{role:'user',content:`[화합물 정보]\n화합물: ${ev.compound_name||'미상'}\n적응증: ${ev.indication||'미상'}\n약물 분류: ${ev.drug_class||'미상'}\n제조 정보: ${ev.manufacturing_info||'공개 정보 없음'}\n\n[MFDS 허가 분류]\n${JSON.stringify(as.license_class||{},null,2)}\n\n[기존 CMC 평가]\n${JSON.stringify(as.cmc_detail||{},null,2)}\n\n7개 CMC/GMP 차원(원료, 완제, 안정성, 불순물, GMP, 공급망, 분석법)을 심층 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 5500, {schema:SCHEMA_CMC, agentName:'Agent06'})).data; }
+    try { cmc = (await callJSON(SYS6, [{role:'user',content:`[화합물 정보]\n화합물: ${ev.compound_name||'미상'}\n적응증: ${ev.indication||'미상'}\n약물 분류: ${ev.drug_class||'미상'}\n제조 정보: ${ev.manufacturing_info||'공개 정보 없음'}\n\n[MFDS 허가 분류]\n${J(as.license_class||{})}\n\n[기존 CMC 평가]\n${J(as.cmc_detail||{})}\n\n7개 CMC/GMP 차원(원료, 완제, 안정성, 불순물, GMP, 공급망, 분석법)을 심층 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 5500, {schema:SCHEMA_CMC, agentName:'Agent06'})).data; }
     catch(e){ throw new Error('Agent 06 JSON 파싱 오류 — '+e.message); }
     setPS('p6','done','완료');
 
@@ -1042,7 +1156,7 @@ async function run() {
     setPS('p7','active','평가 중');
     setSL('▸ 건강보험 급여 등재 가능성을 평가하고 있습니다...');
     let hira;
-    try { hira = (await callJSON(SYS7, [{role:'user',content:`[화합물 정보]\n화합물: ${ev.compound_name||'미상'}\n적응증: ${ev.indication||'미상'}\n작용기전: ${ev.mechanism||'미상'}\n약물 분류: ${ev.drug_class||'미상'}\n특별 지정: ${(ev.special_designations||[]).join(', ')||'없음'}\n\n[임상 유효성]\n${JSON.stringify(ev.efficacy_results||{},null,2)}\n\n[MFDS 평가]\n허가 분류: ${as.license_class?.primary||'미상'}\n전반 리스크: ${as.risks?.overall?.level||'미상'}\n\n[한국 선례]\n${JSON.stringify(pr.same_indication_kr||[],null,2)}\n\nHIRA 급여 등재 가능성을 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 5500, {schema:SCHEMA_HIRA, agentName:'Agent07'})).data; }
+    try { hira = (await callJSON(SYS7, [{role:'user',content:`[화합물 정보]\n화합물: ${ev.compound_name||'미상'}\n적응증: ${ev.indication||'미상'}\n작용기전: ${ev.mechanism||'미상'}\n약물 분류: ${ev.drug_class||'미상'}\n특별 지정: ${(ev.special_designations||[]).join(', ')||'없음'}\n\n[임상 유효성]\n${J(ev.efficacy_results||{})}\n\n[MFDS 평가]\n허가 분류: ${as.license_class?.primary||'미상'}\n전반 리스크: ${as.risks?.overall?.level||'미상'}\n\n[한국 선례]\n${J(pr.same_indication_kr||[])}\n\nHIRA 급여 등재 가능성을 평가하세요. 어떤 설명도 없이 오직 완전한 JSON 객체 하나만 반환하세요.`}], 5500, {schema:SCHEMA_HIRA, agentName:'Agent07'})).data; }
     catch(e){ throw new Error('Agent 07 JSON 파싱 오류 — '+e.message); }
     setPS('p7','done','완료');
 
